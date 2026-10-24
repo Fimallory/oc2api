@@ -93,21 +93,26 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
-		"status":  "ok",
-		"lane":    s.cfg.Lane,
-		"exits":   s.pool.States(),
-		"cache":   s.cache.Stats(),
-		"catalog": s.catalogInfo(),
+		"status":          "ok",
+		"lane":            s.cfg.Lane,
+		"exits":           s.pool.States(),
+		"cache":           s.cache.Stats(),
+		"catalog":         s.catalogInfo(),
+		"disabled_models": s.cat.Disabled(),
 	})
 }
 
 func (s *Server) catalogInfo() map[string]any {
 	info := map[string]any{
 		"models":  len(s.cat.List()),
+		"live":    s.cat.LiveCount(),
 		"fetched": s.cat.Fetched().Format(time.RFC3339),
 	}
 	if err := s.cat.Err(); err != nil {
 		info["error"] = err.Error()
+	}
+	if err := s.cat.LiveErr(); err != nil {
+		info["live_error"] = err.Error()
 	}
 	return info
 }
@@ -268,10 +273,16 @@ func (s *Server) handleResponses(w http.ResponseWriter, r *http.Request) {
 			s.respond(w, r, resp, model.Protocol, req, clientModel, injected, clientTools, key, started)
 			return
 		}
-		reason, upstreamBody := gateway.Classify(resp, time.Duration(s.cfg.BlockSeconds)*time.Second, time.Duration(s.cfg.QuotaSeconds)*time.Second)
+		reason, upstreamBody, modelGone := gateway.Classify(resp, time.Duration(s.cfg.BlockSeconds)*time.Second, time.Duration(s.cfg.QuotaSeconds)*time.Second)
 		lastReason = reason
 		lastStatus = resp.StatusCode
 		s.logf("exit=%s status=%d reason=%s body=%s", exit.Name, resp.StatusCode, reason, zen.Truncate(string(upstreamBody), 200))
+		if modelGone {
+			s.cat.Disable(clientModel, reason)
+			s.logf("model disabled model=%s reason=%s", clientModel, reason)
+			writeError(w, http.StatusGone, fmt.Sprintf("model %q is no longer available upstream: %s", clientModel, reason), "model_deprecated")
+			return
+		}
 		if resp.StatusCode >= 400 && resp.StatusCode < 500 && resp.StatusCode != http.StatusUnauthorized && resp.StatusCode != http.StatusForbidden && resp.StatusCode != http.StatusTooManyRequests {
 			writeError(w, resp.StatusCode, string(upstreamBody), "upstream_error")
 			return

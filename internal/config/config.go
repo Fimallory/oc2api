@@ -42,6 +42,14 @@ type Config struct {
 	QuotaSeconds int `json:"quota_seconds"`
 	// CatalogRefreshMinutes is the model catalog refresh interval.
 	CatalogRefreshMinutes int `json:"catalog_refresh_minutes"`
+	// ProbeOnStart tests every free model with a minimal request at startup.
+	ProbeOnStart bool `json:"probe_on_start"`
+	// ProbeConcurrency is the number of models probed in parallel.
+	ProbeConcurrency int `json:"probe_concurrency"`
+	// ProbeTimeoutSeconds bounds one probe request.
+	ProbeTimeoutSeconds int `json:"probe_timeout_seconds"`
+	// ProbeIntervalMS spaces probes out so they do not trip rate limiting.
+	ProbeIntervalMS int `json:"probe_interval_ms"`
 	// CacheEnabled turns the request-hash response cache on.
 	CacheEnabled bool `json:"cache_enabled"`
 	// CacheTTLSeconds is how long a cached response stays valid.
@@ -69,6 +77,10 @@ func Default() Config {
 		QuotaSeconds:          60,
 		CatalogRefreshMinutes: 10,
 		ReasoningEffort:       "",
+		ProbeOnStart:          true,
+		ProbeConcurrency:      1,
+		ProbeTimeoutSeconds:   30,
+		ProbeIntervalMS:       700,
 		CacheEnabled:          true,
 		CacheTTLSeconds:       1800,
 		CacheMaxEntries:       500,
@@ -128,6 +140,14 @@ func applyEnv(cfg *Config) {
 	}
 	if v := os.Getenv("OC2API_REASONING_EFFORT"); v != "" {
 		cfg.ReasoningEffort = v
+	}
+	if v := os.Getenv("OC2API_PROBE"); v != "" {
+		cfg.ProbeOnStart = v != "0" && !strings.EqualFold(v, "false")
+	}
+	if v := os.Getenv("OC2API_PROBE_CONCURRENCY"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			cfg.ProbeConcurrency = n
+		}
 	}
 	if v := os.Getenv("OC2API_CACHE"); v != "" {
 		cfg.CacheEnabled = v != "0" && !strings.EqualFold(v, "false")
@@ -193,6 +213,15 @@ func (c *Config) Validate() error {
 	}
 	if c.CatalogRefreshMinutes <= 0 {
 		c.CatalogRefreshMinutes = 10
+	}
+	if c.ProbeConcurrency <= 0 {
+		c.ProbeConcurrency = 1
+	}
+	if c.ProbeIntervalMS < 0 {
+		c.ProbeIntervalMS = 0
+	}
+	if c.ProbeTimeoutSeconds <= 0 {
+		c.ProbeTimeoutSeconds = 30
 	}
 	if c.CacheTTLSeconds <= 0 {
 		c.CacheTTLSeconds = 1800

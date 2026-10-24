@@ -42,12 +42,15 @@ type Model struct {
 
 // Catalog is a cached snapshot of the OpenCode model catalog.
 type Catalog struct {
-	mu       sync.RWMutex
-	byPublic map[string]Model
-	byID     map[string]Model
-	source   string
-	fetched  time.Time
-	err      error
+	mu        sync.RWMutex
+	byPublic  map[string]Model
+	byID      map[string]Model
+	disabled  map[string]string
+	source    string
+	fetched   time.Time
+	liveCount int
+	liveErr   error
+	err       error
 }
 
 const defaultSource = "https://models.opencode.ai/api.json"
@@ -61,6 +64,7 @@ func New(source string) *Catalog {
 		source:   source,
 		byPublic: map[string]Model{},
 		byID:     map[string]Model{},
+		disabled: map[string]string{},
 	}
 }
 
@@ -79,8 +83,9 @@ func (c *Catalog) Start(ctx context.Context, interval time.Duration, logf func(s
 		if logf != nil {
 			c.mu.RLock()
 			n := len(c.byPublic)
+			live := c.liveCount
 			c.mu.RUnlock()
-			logf("catalog loaded: %d free models", n)
+			logf("catalog loaded: %d free models (%d live upstream)", n, live)
 		}
 	}
 	refresh()
@@ -119,17 +124,96 @@ func (c *Catalog) Refresh(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	byPublic, byID, err := parse(raw)
+	live, liveErr := c.fetchLive(ctx)
+	byPublic, byID, err := parse(raw, live)
 	if err != nil {
 		return err
 	}
 	c.mu.Lock()
 	c.byPublic = byPublic
 	c.byID = byID
+	c.liveCount = len(live)
+	c.liveErr = liveErr
 	c.fetched = time.Now()
 	c.err = nil
 	c.mu.Unlock()
 	return nil
+}
+
+// liveSource lists the models the inference gateway currently serves. It needs
+// no credential and is the cheapest way to drop deprecated models: the catalog
+// keeps advertising retired ids long after the gateway stops serving them.
+const liveSource = "https://opencode.ai/inference/v1/models"
+
+type liveFile struct {
+	Data []struct {
+		ID string `json:"id"`
+	} `json:"data"`
+}
+
+func (c *Catalog) fetchLive(ctx context.Context) (map[string]bool, error) {
+	reqCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, liveSource, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("User-Agent", "opencode/latest/2.1.1/cli")
+	req.Header.Set("x-opencode-client", "cli")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("live models: HTTP %d", resp.StatusCode)
+	}
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+	if err != nil {
+		return nil, err
+	}
+	var file liveFile
+	if err := json.Unmarshal(raw, &file); err != nil {
+		return nil, err
+	}
+	live := make(map[string]bool, len(file.Data))
+	for _, item := range file.Data {
+		if item.ID != "" {
+			live[item.ID] = true
+		}
+	}
+	return live, nil
+}
+
+// Disable removes a model from the published catalog. A startup probe or an
+// upstream ModelDeprecated response is authoritative until the process
+// restarts, because a catalog refresh would otherwise resurrect it.
+func (c *Catalog) Disable(publicID, reason string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.disabled == nil {
+		c.disabled = map[string]string{}
+	}
+	c.disabled[publicID] = reason
+}
+
+// IsDisabled reports whether a published model was removed.
+func (c *Catalog) IsDisabled(publicID string) bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	_, ok := c.disabled[publicID]
+	return ok
+}
+
+// Disabled returns the removed models and their reasons.
+func (c *Catalog) Disabled() map[string]string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	out := make(map[string]string, len(c.disabled))
+	for id, reason := range c.disabled {
+		out[id] = reason
+	}
+	return out
 }
 
 type catalogFile struct {
@@ -154,7 +238,7 @@ type catalogModelDef struct {
 	} `json:"cost"`
 }
 
-func parse(raw []byte) (map[string]Model, map[string]Model, error) {
+func parse(raw []byte, live map[string]bool) (map[string]Model, map[string]Model, error) {
 	var file catalogFile
 	if err := json.Unmarshal(raw, &file); err != nil {
 		return nil, nil, err
@@ -173,6 +257,11 @@ func parse(raw []byte) (map[string]Model, map[string]Model, error) {
 			if def.Provider.API != "" {
 				api = def.Provider.API
 			}
+		}
+		// The live list is authoritative: a catalog entry the gateway no
+		// longer serves is a deprecated model, not a usable one.
+		if len(live) > 0 && !live[id] {
+			continue
 		}
 		protocol := protocolFor(npm)
 		free := def.Cost.Input == 0 && def.Cost.Output == 0
@@ -235,13 +324,14 @@ func baseURLFor(protocol Protocol, catalogAPI string) string {
 // name heuristic so a catalog outage does not take the gateway down.
 func (c *Catalog) Lookup(id string, freeOnly bool) (Model, bool) {
 	c.mu.RLock()
+	_, removed := c.disabled[id]
 	byPublic := c.byPublic[id]
 	byID, hasID := c.byID[id]
-	publicHit := false
-	if _, ok := c.byPublic[id]; ok {
-		publicHit = true
-	}
+	_, publicHit := c.byPublic[id]
 	c.mu.RUnlock()
+	if removed {
+		return Model{}, false
+	}
 
 	if freeOnly {
 		if publicHit {
@@ -301,7 +391,10 @@ func (c *Catalog) List() []Model {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	out := make([]Model, 0, len(c.byPublic))
-	for _, model := range c.byPublic {
+	for id, model := range c.byPublic {
+		if _, removed := c.disabled[id]; removed {
+			continue
+		}
 		out = append(out, model)
 	}
 	return out
@@ -322,6 +415,20 @@ func Endpoint(model Model, protocol Protocol, modelID string) string {
 	default:
 		return base + "/chat/completions"
 	}
+}
+
+// LiveCount reports how many ids the upstream gateway listed.
+func (c *Catalog) LiveCount() int {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.liveCount
+}
+
+// LiveErr reports why the live list could not be fetched.
+func (c *Catalog) LiveErr() error {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.liveErr
 }
 
 // Err is the last refresh error, if any.

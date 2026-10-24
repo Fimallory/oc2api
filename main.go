@@ -57,7 +57,14 @@ func main() {
 		store = cache.New(cfg.CacheMaxEntries, time.Duration(cfg.CacheTTLSeconds)*time.Second)
 	}
 
-	handler := server.New(cfg, cat, pool, store, logger).Handler()
+	srv := server.New(cfg, cat, pool, store, logger)
+	if cfg.ProbeOnStart {
+		probeCtx, probeCancel := context.WithTimeout(ctx, 5*time.Minute)
+		srv.Probe(probeCtx)
+		probeCancel()
+	}
+
+	handler := srv.Handler()
 	httpServer := &http.Server{
 		Addr:              cfg.Listen,
 		Handler:           handler,

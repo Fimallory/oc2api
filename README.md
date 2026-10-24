@@ -85,6 +85,8 @@ curl http://127.0.0.1:8787/v1/models
 
 **模型命名**：目录在代码层过滤为「免费 / 匿名」模型，并把 id 末尾的 `-free` 去掉后对外暴露。也就是说客户端请求 `glm-5.3-flash`，网关内部使用 `glm-5.3-flash-free` 访问上游；`/v1/models` 返回的也是去掉后缀的名字。`big-pickle`、`grok-code` 这类本身无后缀的模型保持原样。
 
+**下线检测**：两层过滤。第一层每次刷新目录时同时拉取免认证的 `https://opencode.ai/inference/v1/models`，与目录做交集，已下线的 id 直接不出现（目录里 46 个免费模型通常只剩 8-9 个 live）。第二层是启动时用 16 token 逐个探测，运行中遇到 `410` / `ModelDeprecated` / `model not found` 也会即时移除；直接请求已移除的模型返回 `410 model_deprecated`。被移除的模型在 `/healthz` 的 `disabled_models` 里可见。
+
 Responses 侧支持：`input`（字符串或 item 数组）、`instructions`、`tools`/`tool_choice`、`max_output_tokens`、`temperature`、`top_p`、`reasoning.effort`、`stream`。输出为标准 Responses 事件序列（`response.created` → `output_item.added` → `response.output_text.delta` → `response.completed` → `[DONE]`），包含 reasoning、function_call 与 usage。
 
 ---
@@ -110,6 +112,7 @@ model + instructions + messages + tools + tool_choice + 采样参数 + reasoning
 ## 5. 出口与重试
 
 - 默认 `direct` 直连；配置 `proxies` 后按轮转顺序追加出口，`http://`、`https://`、`socks5://` 都支持。
+- 代理条目末尾加 `#pool` 表示这是一个**轮换代理池**：不参与冷却，且每次请求都新建连接（不复用 keep-alive），因为出口 IP 是按连接分配的。
 - 403（FreeTierError）→ 该出口冷却 900 秒，换出口并用**新的**会话 ID 重试。
 - 429（FreeUsageLimitError）→ 该出口冷却 60 秒，换出口重试。
 - 5xx / 网络错误 → 冷却 15 秒后换出口。
@@ -141,6 +144,10 @@ model + instructions + messages + tools + tool_choice + 采样参数 + reasoning
 | `max_attempts` | `OC2API_MAX_ATTEMPTS` | `0` | 每次请求最多尝试的出口数，0 为全部 |
 | `block_seconds` | - | `900` | FreeTierError 出口冷却 |
 | `quota_seconds` | - | `60` | 429 出口冷却 |
+| `probe_on_start` | `OC2API_PROBE` | `true` | 启动时用 16 token 探测每个免费模型，剔除已下线的 |
+| `probe_concurrency` | `OC2API_PROBE_CONCURRENCY` | `1` | 探测并发数 |
+| `probe_timeout_seconds` | - | `30` | 单次探测超时 |
+| `probe_interval_ms` | - | `700` | 探测间隔，避免触发限流 |
 | `reasoning_effort` | `OC2API_REASONING_EFFORT` | 空 | 默认注入的 `reasoning_effort`（`low`/`high`…） |
 | `debug` | `OC2API_DEBUG` | `false` | 打印每次上游尝试 |
 

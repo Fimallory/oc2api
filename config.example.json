@@ -6,8 +6,15 @@
   "upstream_mode": "catalog",
   "api_key": "",
   "direct": true,
-  "proxies": [],
+  "proxies": [
+    "http://user:pass@host:port",
+    "http://user:pass@rotating-host:80#pool"
+  ],
   "free_only": true,
+  "probe_on_start": true,
+  "probe_concurrency": 1,
+  "probe_timeout_seconds": 30,
+  "probe_interval_ms": 700,
   "cache_enabled": true,
   "cache_ttl_seconds": 1800,
   "cache_max_entries": 500,
