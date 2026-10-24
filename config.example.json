@@ -1,0 +1,21 @@
+{
+  "listen": "127.0.0.1:8787",
+  "local_key": "",
+  "lane": "v2",
+  "upstream": "https://opencode.ai/inference",
+  "upstream_mode": "catalog",
+  "api_key": "",
+  "direct": true,
+  "proxies": [],
+  "free_only": true,
+  "cache_enabled": true,
+  "cache_ttl_seconds": 1800,
+  "cache_max_entries": 500,
+  "catalog_refresh_minutes": 10,
+  "request_timeout_seconds": 0,
+  "max_attempts": 0,
+  "block_seconds": 900,
+  "quota_seconds": 60,
+  "reasoning_effort": "",
+  "debug": false
+}

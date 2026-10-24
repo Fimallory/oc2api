@@ -1,0 +1,34 @@
+version: "3.8"
+
+services:
+  oc2api:
+    build: .
+    image: oc2api:local
+    container_name: oc2api
+    restart: always
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      - TZ=Asia/Shanghai
+    volumes:
+      - ./config.json:/app/config.json:ro
+    tmpfs:
+      - /tmp
+    networks:
+      axonhub-net:
+        # AxonHub channel 37 still points at http://muse:3334/v1; the alias
+        # keeps that URL working without touching AxonHub.
+        aliases:
+          - muse
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:3334/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+networks:
+  axonhub-net:
+    external: true
+    name: axonhub_axonhub-network

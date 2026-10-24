@@ -1,0 +1,16 @@
+# binaries
+*.exe
+oc2api
+oc2api-linux-amd64
+deploy/oc2api
+
+# runtime config and logs
+config.json
+deploy/config.json
+*.log
+
+# editor / OS
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
